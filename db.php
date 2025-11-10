@@ -7,9 +7,11 @@
 // Database configuration
 define('DB_HOST', 'localhost');
 define('DB_NAME', 'smses_send');
-define('DB_USER', 'root');
-define('DB_PASS', '');
+define('DB_USER', 'smses_senduser');
+define('DB_PASS', 'user007');
 define('DB_CHARSET', 'utf8mb4');
+
+
 
 /**
  * Get database connection
@@ -301,5 +303,58 @@ function cancelBatch($batchId) {
     $stmt->bind_param('s', $batchId);
     $stmt->execute();
     $stmt->close();
+}
+
+/**
+ * Get all email batches
+ * @return array List of all batches
+ */
+function getAllBatches() {
+    $mysqli = getDbConnection();
+    
+    $sql = "SELECT * FROM email_batches 
+            ORDER BY created_at DESC";
+    $result = $mysqli->query($sql);
+    
+    $batches = [];
+    while ($row = $result->fetch_assoc()) {
+        $batches[] = $row;
+    }
+    
+    return $batches;
+}
+
+/**
+ * Delete batch and all associated emails
+ * @param string $batchId Batch ID
+ */
+function deleteBatchById($batchId) {
+    $mysqli = getDbConnection();
+    
+    // Start transaction
+    $mysqli->begin_transaction();
+    
+    try {
+        // Delete all emails in the queue for this batch
+        $sql = "DELETE FROM email_queue WHERE batch_id = ?";
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('s', $batchId);
+        $stmt->execute();
+        $stmt->close();
+        
+        // Delete the batch
+        $sql = "DELETE FROM email_batches WHERE batch_id = ?";
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('s', $batchId);
+        $stmt->execute();
+        $stmt->close();
+        
+        // Commit transaction
+        $mysqli->commit();
+    } catch (Exception $e) {
+        // Rollback on error
+        $mysqli->rollback();
+        throw $e;
+    }
 }
 

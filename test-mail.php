@@ -71,9 +71,46 @@ if (isset($_GET['logout'])) {
     exit();
 }
 
+// Handle AJAX requests for Process Manager
+if (isset($_GET['action']) && isset($_SERVER['HTTP_X_REQUESTED_WITH']) && $_SERVER['HTTP_X_REQUESTED_WITH'] === 'XMLHttpRequest') {
+    require_once __DIR__ . '/db.php';
+    header('Content-Type: application/json');
+    
+    if ($_GET['action'] === 'get_batches') {
+        try {
+            $batches = getAllBatches();
+            echo json_encode(['success' => true, 'batches' => $batches]);
+        } catch (Exception $e) {
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        }
+        exit();
+    }
+}
+
+// Handle POST request for deleting batch
+if (isset($_GET['action']) && $_GET['action'] === 'delete_batch' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/db.php';
+    header('Content-Type: application/json');
+    
+    $batchId = $_POST['batch_id'] ?? null;
+    
+    if (!$batchId) {
+        echo json_encode(['success' => false, 'error' => 'Batch ID is required']);
+        exit();
+    }
+    
+    try {
+        deleteBatchById($batchId);
+        echo json_encode(['success' => true]);
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+    exit();
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
     require __DIR__ . '/vendor/autoload.php';
-    require __DIR__ . '/db.php';
+    require_once __DIR__ . '/db.php';
 
     // Retrieve form data
     $host     = field('host');
@@ -312,23 +349,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
             font-size: 16px;
         }
 
-        .logout-btn {
+        .header-buttons {
             position: absolute;
             top: 20px;
             right: 20px;
+            display: flex;
+            gap: 12px;
+        }
+
+        .logout-btn {
             background: rgba(255, 255, 255, 0.2);
             color: white;
-            padding: 8px 20px;
-            border-radius: 6px;
+            padding: 10px 24px;
+            border-radius: 8px;
             text-decoration: none;
             font-weight: 600;
             transition: all 0.2s ease;
             border: 2px solid rgba(255, 255, 255, 0.3);
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
         }
 
         .logout-btn:hover {
-            background: rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.35);
             transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .process-manager-btn {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            padding: 10px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            cursor: pointer;
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .process-manager-btn:hover {
+            background: rgba(255, 255, 255, 0.35);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
 
         .content {
@@ -615,6 +684,292 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
             button[type="submit"] {
                 width: 100%;
             }
+
+            .header-buttons {
+                position: static;
+                margin-top: 16px;
+                justify-content: center;
+            }
+
+            .logout-btn,
+            .process-manager-btn {
+                flex: 1;
+                max-width: 200px;
+                justify-content: center;
+            }
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0, 0, 0, 0.6);
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .modal.active {
+            display: block;
+        }
+
+        .modal-content {
+            background-color: #ffffff;
+            margin: 3% auto;
+            padding: 0;
+            border-radius: 16px;
+            width: 90%;
+            max-width: 1200px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+            animation: slideDown 0.3s ease;
+        }
+
+        @keyframes slideDown {
+            from {
+                transform: translateY(-50px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        .modal-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 24px 30px;
+            border-radius: 16px 16px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .close-modal {
+            color: white;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+            line-height: 1;
+            padding: 0;
+        }
+
+        .close-modal:hover {
+            background: rgba(255, 255, 255, 0.35);
+            transform: rotate(90deg) scale(1.1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .close-modal:active {
+            transform: rotate(90deg) scale(0.95);
+        }
+
+        .modal-body {
+            padding: 30px;
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+
+        .batch-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .batch-table th {
+            background: #f3f4f6;
+            color: #374151;
+            font-weight: 700;
+            padding: 14px;
+            text-align: left;
+            border-bottom: 2px solid #e5e7eb;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .batch-table td {
+            padding: 14px;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 14px;
+        }
+
+        .batch-table tr:hover {
+            background: #f9fafb;
+        }
+
+        .batch-status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .batch-status.pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .batch-status.processing {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .batch-status.paused {
+            background: #fed7aa;
+            color: #9a3412;
+        }
+
+        .batch-status.completed {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .batch-status.cancelled {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .batch-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .batch-actions a {
+            padding: 8px 16px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+
+        .btn-view {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+        }
+
+        .btn-view:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-view:active {
+            transform: translateY(0);
+        }
+
+        .btn-delete {
+            background: #ef4444;
+            color: white;
+            border: 2px solid #dc2626;
+        }
+
+        .btn-delete:hover {
+            background: #dc2626;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+        }
+
+        .btn-delete:active {
+            transform: translateY(0);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6b7280;
+        }
+
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 16px;
+        }
+
+        .empty-state-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #374151;
+            margin-bottom: 8px;
+        }
+
+        .empty-state-text {
+            font-size: 14px;
+        }
+
+        .batch-progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+
+        .batch-progress-fill {
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
+        }
+
+        .filter-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .filter-tab {
+            padding: 10px 20px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            background: white;
+            color: #6b7280;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 14px;
+        }
+
+        .filter-tab:hover {
+            border-color: #667eea;
+            color: #667eea;
+        }
+
+        .filter-tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: #667eea;
         }
     </style>
 </head>
@@ -622,7 +977,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
 <body>
     <div class="container">
         <div class="header">
-            <a href="?logout=1" class="logout-btn">🚪 Logout</a>
+            <div class="header-buttons">
+                <button onclick="openProcessManager()" class="process-manager-btn">📊 Process Manager</button>
+                <a href="?logout=1" class="logout-btn">🚪 Logout</a>
+            </div>
             <h1>📧 SMTP Bulk Email Sender</h1>
             <p>Professional SMTP server testing and bulk email delivery system</p>
         </div>
@@ -813,7 +1171,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
         </div>
     </div>
 
+    <!-- Process Manager Modal -->
+    <div id="processManagerModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>📊 Process Manager</h2>
+                <button class="close-modal" onclick="closeProcessManager()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="filter-tabs">
+                    <button class="filter-tab active" onclick="filterBatches('all')">All</button>
+                    <button class="filter-tab" onclick="filterBatches('pending')">Pending</button>
+                    <button class="filter-tab" onclick="filterBatches('processing')">Processing</button>
+                    <button class="filter-tab" onclick="filterBatches('paused')">Paused</button>
+                    <button class="filter-tab" onclick="filterBatches('completed')">Completed</button>
+                    <button class="filter-tab" onclick="filterBatches('cancelled')">Cancelled</button>
+                </div>
+                <div id="batchListContainer">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⏳</div>
+                        <div class="empty-state-title">Loading batches...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
+        let currentFilter = 'all';
+        let allBatches = [];
+
         function toggleEmailMode() {
             const isBulk = document.getElementById('bulk_email').checked;
             document.getElementById('singleEmailSection').style.display = isBulk ? 'none' : 'block';
@@ -828,6 +1215,179 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
             document.getElementById('emailForm').reset();
             toggleEmailMode();
         }
+
+        // Process Manager Functions
+        function openProcessManager() {
+            document.getElementById('processManagerModal').classList.add('active');
+            loadBatches();
+        }
+
+        function closeProcessManager() {
+            document.getElementById('processManagerModal').classList.remove('active');
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('processManagerModal');
+            if (event.target === modal) {
+                closeProcessManager();
+            }
+        }
+
+        async function loadBatches() {
+            try {
+                const response = await fetch('test-mail.php?action=get_batches', {
+                    method: 'GET',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                
+                const data = await response.json();
+                allBatches = data.batches || [];
+                renderBatches();
+            } catch (error) {
+                console.error('Error loading batches:', error);
+                document.getElementById('batchListContainer').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">❌</div>
+                        <div class="empty-state-title">Error Loading Batches</div>
+                        <div class="empty-state-text">${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+
+        function filterBatches(status) {
+            currentFilter = status;
+            
+            // Update active tab
+            document.querySelectorAll('.filter-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            renderBatches();
+        }
+
+        function renderBatches() {
+            const container = document.getElementById('batchListContainer');
+            
+            // Filter batches based on current filter
+            let filteredBatches = allBatches;
+            if (currentFilter !== 'all') {
+                filteredBatches = allBatches.filter(batch => batch.status === currentFilter);
+            }
+            
+            if (filteredBatches.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📭</div>
+                        <div class="empty-state-title">No Batches Found</div>
+                        <div class="empty-state-text">No email batches match the current filter.</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = `
+                <table class="batch-table">
+                    <thead>
+                        <tr>
+                            <th>Batch ID</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Total</th>
+                            <th>Sent</th>
+                            <th>Failed</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            filteredBatches.forEach(batch => {
+                const totalEmails = parseInt(batch.total_emails) || 0;
+                const sentCount = parseInt(batch.sent_count) || 0;
+                const failedCount = parseInt(batch.failed_count) || 0;
+                const progress = totalEmails > 0 
+                    ? Math.min(100, Math.round(((sentCount + failedCount) / totalEmails) * 100))
+                    : 0;
+                
+                const createdDate = new Date(batch.created_at).toLocaleString();
+                
+                html += `
+                    <tr>
+                        <td><code>${batch.batch_id}</code></td>
+                        <td><span class="batch-status ${batch.status}">${batch.status}</span></td>
+                        <td>
+                            <div><strong>${progress}%</strong></div>
+                            <div class="batch-progress-bar">
+                                <div class="batch-progress-fill" style="width: ${progress}%"></div>
+                            </div>
+                        </td>
+                        <td><strong>${totalEmails}</strong></td>
+                        <td><span style="color: #10b981; font-weight: 600;">${sentCount}</span></td>
+                        <td><span style="color: #ef4444; font-weight: 600;">${failedCount}</span></td>
+                        <td>${createdDate}</td>
+                        <td>
+                            <div class="batch-actions">
+                                <a href="process.php?batch=${encodeURIComponent(batch.batch_id)}" class="btn-view" target="_blank">
+                                    👁 View
+                                </a>
+                                <a href="#" onclick="deleteBatch('${batch.batch_id}'); return false;" class="btn-delete">
+                                    🗑 Delete
+                                </a>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            html += `
+                    </tbody>
+                </table>
+            `;
+            
+            container.innerHTML = html;
+        }
+
+        async function deleteBatch(batchId) {
+            if (!confirm('Are you sure you want to delete this batch? This action cannot be undone.')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('test-mail.php?action=delete_batch', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: 'batch_id=' + encodeURIComponent(batchId)
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Reload batches
+                    loadBatches();
+                } else {
+                    alert('Error deleting batch: ' + data.error);
+                }
+            } catch (error) {
+                alert('Error deleting batch: ' + error.message);
+            }
+        }
+
+        // Auto-refresh batches every 5 seconds when modal is open
+        setInterval(() => {
+            const modal = document.getElementById('processManagerModal');
+            if (modal.classList.contains('active')) {
+                loadBatches();
+            }
+        }, 5000);
     </script>
 </body>
 
