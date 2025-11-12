@@ -9,6 +9,8 @@ define('DB_HOST', 'localhost');
 define('DB_NAME', 'smses_send');
 define('DB_USER', 'smses_senduser');
 define('DB_PASS', 'user007');
+// define('DB_USER', 'root');
+// define('DB_PASS', '');
 define('DB_CHARSET', 'utf8mb4');
 
 
@@ -61,8 +63,9 @@ function createEmailBatch($config) {
     if ($columnExists) {
         $sql = "INSERT INTO email_batches (
             batch_id, smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
-            from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails, include_email_in_subject
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails, 
+            sent_count, failed_count, include_email_in_subject
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)";
         
         $stmt = $mysqli->prepare($sql);
         $is_html = $config['is_html'] ? 1 : 0;
@@ -89,14 +92,15 @@ function createEmailBatch($config) {
         // Fallback to old schema if column doesn't exist
         $sql = "INSERT INTO email_batches (
             batch_id, smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
-            from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails,
+            sent_count, failed_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)";
         
         $stmt = $mysqli->prepare($sql);
         $is_html = $config['is_html'] ? 1 : 0;
         $debug_mode = $config['debug'] ? 1 : 0;
         
-        $stmt->bind_param('ssisssssssiiii',
+        $stmt->bind_param('ssisssssssiiiii',
             $batchId,
             $config['host'],
             $config['port'],
@@ -171,12 +175,45 @@ function getBatchInfo($batchId) {
 }
 
 /**
+ * Reset emails stuck in processing state (older than 10 minutes)
+ * @param string $batchId Batch ID
+ */
+function resetStuckProcessingEmails($batchId) {
+    $mysqli = getDbConnection();
+    
+    // Reset emails that are in processing state, don't have sent_at, and were created more than 10 minutes ago
+    // This catches emails that got stuck in processing state
+    $sql = "UPDATE email_queue 
+            SET status = 'pending',
+                error_message = CONCAT(COALESCE(error_message, ''), ' [Reset from stuck processing state - retrying]')
+            WHERE batch_id = ? 
+            AND status = 'processing' 
+            AND sent_at IS NULL
+            AND created_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)";
+    
+    $stmt = $mysqli->prepare($sql);
+    $stmt->bind_param('s', $batchId);
+    $stmt->execute();
+    $resetCount = $stmt->affected_rows;
+    $stmt->close();
+    
+    if ($resetCount > 0) {
+        error_log("Reset $resetCount stuck processing emails for batch: $batchId");
+    }
+    
+    return $resetCount;
+}
+
+/**
  * Get pending emails for a batch
  * @param string $batchId Batch ID
  * @return array List of pending emails
  */
 function getPendingEmails($batchId) {
     $mysqli = getDbConnection();
+    
+    // First, reset any emails stuck in processing state
+    resetStuckProcessingEmails($batchId);
     
     $sql = "SELECT * FROM email_queue 
             WHERE batch_id = ? AND status = 'pending' 
@@ -201,21 +238,55 @@ function getPendingEmails($batchId) {
 function updateEmailStatus($emailId, $status, $errorMessage = null) {
     $mysqli = getDbConnection();
     
-    $sql = "UPDATE email_queue 
-            SET status = ?, 
-                error_message = ?,
-                attempts = attempts + 1";
-    
+    // For 'sent' status, always update regardless of current status
     if ($status === 'sent') {
-        $sql .= ", sent_at = NOW()";
+        // Cast emailId to int to ensure proper type matching
+        $emailId = (int)$emailId;
+        
+        // Update without status condition to ensure it always updates
+        $sql = "UPDATE email_queue 
+                SET status = 'sent', 
+                    sent_at = NOW(),
+                    error_message = ?,
+                    attempts = attempts + 1
+                WHERE id = ?";
+        
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('si', $errorMessage, $emailId);
+        $stmt->execute();
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+        
+        // Log if update failed for debugging
+        if ($affectedRows === 0) {
+            error_log("ERROR: updateEmailStatus failed to update email_id: " . $emailId . " to 'sent' status. Email may not exist in database.");
+        } else {
+            error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to 'sent' status");
+        }
+    } else {
+        // For other statuses (failed, etc.)
+        // Cast emailId to int to ensure proper type matching
+        $emailId = (int)$emailId;
+        
+        $sql = "UPDATE email_queue 
+                SET status = ?, 
+                    error_message = ?,
+                    attempts = attempts + 1
+                WHERE id = ?";
+        
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('ssi', $status, $errorMessage, $emailId);
+        $stmt->execute();
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+        
+        // Check if update was successful
+        if ($affectedRows === 0) {
+            error_log("ERROR: updateEmailStatus did not update any rows for email_id: " . $emailId . " with status: " . $status);
+        } else {
+            error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to status: " . $status);
+        }
     }
-    
-    $sql .= " WHERE id = ?";
-    
-    $stmt = $mysqli->prepare($sql);
-    $stmt->bind_param('ssi', $status, $errorMessage, $emailId);
-    $stmt->execute();
-    $stmt->close();
 }
 
 /**
@@ -249,10 +320,11 @@ function updateBatchStatus($batchId, $status) {
 function updateBatchCounts($batchId) {
     $mysqli = getDbConnection();
     
-    // Get counts
+    // Get counts - use COALESCE to convert NULL to 0
+    // Count only 'sent' and 'failed' statuses, exclude 'processing' and 'pending'
     $sql = "SELECT 
-                SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent_count,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
+                COALESCE(SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END), 0) as sent_count,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed_count
             FROM email_queue 
             WHERE batch_id = ?";
     
@@ -264,15 +336,25 @@ function updateBatchCounts($batchId) {
     $counts = $result->fetch_assoc();
     $stmt->close();
     
-    // Update batch
+    // Ensure counts are integers (not NULL)
+    $sentCount = (int)($counts['sent_count'] ?? 0);
+    $failedCount = (int)($counts['failed_count'] ?? 0);
+    
+    // Update batch - ensure we're updating even if counts are 0
     $sql = "UPDATE email_batches 
             SET sent_count = ?, 
                 failed_count = ? 
             WHERE batch_id = ?";
     
     $stmt = $mysqli->prepare($sql);
-    $stmt->bind_param('iis', $counts['sent_count'], $counts['failed_count'], $batchId);
+    $stmt->bind_param('iis', $sentCount, $failedCount, $batchId);
     $stmt->execute();
+    
+    // Check if update was successful
+    if ($stmt->affected_rows === 0) {
+        error_log("Warning: updateBatchCounts did not update any rows for batch_id: " . $batchId);
+    }
+    
     $stmt->close();
 }
 
@@ -284,15 +366,18 @@ function updateBatchCounts($batchId) {
 function getBatchProgress($batchId) {
     $mysqli = getDbConnection();
     
+    // Get counts directly from email_queue for accuracy, then update batch table
     $sql = "SELECT 
                 b.total_emails,
-                b.sent_count,
-                b.failed_count,
                 b.status,
-                (SELECT COUNT(*) FROM email_queue WHERE batch_id = b.batch_id AND status = 'pending') as pending_count,
-                (SELECT COUNT(*) FROM email_queue WHERE batch_id = b.batch_id AND status = 'processing') as processing_count
+                COALESCE(SUM(CASE WHEN eq.status = 'sent' THEN 1 ELSE 0 END), 0) as sent_count,
+                COALESCE(SUM(CASE WHEN eq.status = 'failed' THEN 1 ELSE 0 END), 0) as failed_count,
+                COALESCE(SUM(CASE WHEN eq.status = 'pending' THEN 1 ELSE 0 END), 0) as pending_count,
+                COALESCE(SUM(CASE WHEN eq.status = 'processing' THEN 1 ELSE 0 END), 0) as processing_count
             FROM email_batches b
-            WHERE b.batch_id = ?";
+            LEFT JOIN email_queue eq ON b.batch_id = eq.batch_id
+            WHERE b.batch_id = ?
+            GROUP BY b.batch_id";
     
     $stmt = $mysqli->prepare($sql);
     $stmt->bind_param('s', $batchId);
@@ -301,6 +386,24 @@ function getBatchProgress($batchId) {
     $result = $stmt->get_result();
     $data = $result->fetch_assoc();
     $stmt->close();
+    
+    // Ensure counts are integers
+    if ($data) {
+        $data['sent_count'] = (int)($data['sent_count'] ?? 0);
+        $data['failed_count'] = (int)($data['failed_count'] ?? 0);
+        $data['pending_count'] = (int)($data['pending_count'] ?? 0);
+        $data['processing_count'] = (int)($data['processing_count'] ?? 0);
+        
+        // Update the batch table with the accurate counts
+        $updateSql = "UPDATE email_batches 
+                     SET sent_count = ?, 
+                         failed_count = ? 
+                     WHERE batch_id = ?";
+        $updateStmt = $mysqli->prepare($updateSql);
+        $updateStmt->bind_param('iis', $data['sent_count'], $data['failed_count'], $batchId);
+        $updateStmt->execute();
+        $updateStmt->close();
+    }
     
     return $data;
 }

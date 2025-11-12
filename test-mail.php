@@ -1322,8 +1322,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
             
             filteredBatches.forEach(batch => {
                 const totalEmails = parseInt(batch.total_emails) || 0;
-                const sentCount = parseInt(batch.sent_count) || 0;
-                const failedCount = parseInt(batch.failed_count) || 0;
+                const sentCount = batch.sent_count !== null && batch.sent_count !== undefined ? parseInt(batch.sent_count) : 0;
+                const failedCount = batch.failed_count !== null && batch.failed_count !== undefined ? parseInt(batch.failed_count) : 0;
                 const progress = totalEmails > 0 
                     ? Math.min(100, Math.round(((sentCount + failedCount) / totalEmails) * 100))
                     : 0;

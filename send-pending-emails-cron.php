@@ -134,10 +134,11 @@ function updateEmailStatus($emailId, $status, $errorMessage = null) {
 function updateBatchCounts($batchId) {
     $mysqli = getDbConnection();
     
-    // Get counts
+    // Get counts - use COALESCE to convert NULL to 0
+    // Count only 'sent' and 'failed' statuses, exclude 'processing' and 'pending'
     $sql = "SELECT 
-                SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent_count,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
+                COALESCE(SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END), 0) as sent_count,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed_count
             FROM email_queue 
             WHERE batch_id = ?";
     
@@ -149,15 +150,25 @@ function updateBatchCounts($batchId) {
     $counts = $result->fetch_assoc();
     $stmt->close();
     
-    // Update batch
+    // Ensure counts are integers (not NULL)
+    $sentCount = (int)($counts['sent_count'] ?? 0);
+    $failedCount = (int)($counts['failed_count'] ?? 0);
+    
+    // Update batch - ensure we're updating even if counts are 0
     $sql = "UPDATE email_batches 
             SET sent_count = ?, 
                 failed_count = ? 
             WHERE batch_id = ?";
     
     $stmt = $mysqli->prepare($sql);
-    $stmt->bind_param('iis', $counts['sent_count'], $counts['failed_count'], $batchId);
+    $stmt->bind_param('iis', $sentCount, $failedCount, $batchId);
     $stmt->execute();
+    
+    // Check if update was successful
+    if ($stmt->affected_rows === 0) {
+        error_log("Warning: updateBatchCounts did not update any rows for batch_id: " . $batchId);
+    }
+    
     $stmt->close();
 }
 
@@ -314,11 +325,6 @@ function processPendingEmails() {
                 // Update status to sent
                 updateEmailStatus($email['id'], 'sent');
                 $results['sent']++;
-                
-                // Track batch for count update
-                if (!in_array($email['batch_id'], $processedBatches)) {
-                    $processedBatches[] = $email['batch_id'];
-                }
             } else {
                 // Update status to failed
                 updateEmailStatus($email['id'], 'failed', $sendResult['message']);
@@ -329,14 +335,23 @@ function processPendingEmails() {
                 ];
             }
             
-            // Update batch counts
+            // Update batch counts immediately after each email status update
             updateBatchCounts($email['batch_id']);
             
-            // Check and update batch status
-            checkAndUpdateBatchStatus($email['batch_id']);
+            // Track batch for final status check
+            if (!in_array($email['batch_id'], $processedBatches)) {
+                $processedBatches[] = $email['batch_id'];
+            }
             
             // Small delay to avoid overwhelming SMTP server
             usleep(200000); // 0.2 seconds
+        }
+        
+        // Final batch status check for all processed batches
+        foreach ($processedBatches as $batchId) {
+            checkAndUpdateBatchStatus($batchId);
+            // Ensure counts are up to date one final time
+            updateBatchCounts($batchId);
         }
         
         return [

@@ -46,7 +46,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $emails = getPendingEmails($batchId);
         
         if (empty($emails)) {
-            // No more emails, mark batch as completed
+            // No more emails, update final counts and mark batch as completed
+            updateBatchCounts($batchId);
             updateBatchStatus($batchId, 'completed');
             echo json_encode(['done' => true]);
             exit();
@@ -65,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
     
     if ($action === 'send_email') {
-        $emailId = $_POST['email_id'] ?? null;
+        $emailId = isset($_POST['email_id']) ? (int)$_POST['email_id'] : null;
         $recipientEmail = $_POST['recipient_email'] ?? null;
         
         if (!$emailId || !$recipientEmail) {
@@ -117,8 +118,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $finalSubject = $batch['subject'];
             $includeEmailInSubject = isset($batch['include_email_in_subject']) && (int)$batch['include_email_in_subject'] === 1;
             if ($includeEmailInSubject && !empty($recipientEmail)) {
-                $emailId = explode('@', $recipientEmail)[0]; // Get part before '@'
-                $finalSubject = $batch['subject'] . ' ' . $emailId;
+                $emailPrefix = explode('@', $recipientEmail)[0]; // Get part before '@'
+                $finalSubject = $batch['subject'] . ' ' . $emailPrefix;
             }
             $mail->Subject = $finalSubject;
             
@@ -140,8 +141,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // Send the email
             $mail->send();
             
-            // Update status to sent
-            updateEmailStatus($emailId, 'sent');
+            // Update status to sent - ensure it's updated from processing to sent
+            // Cast to int to ensure proper type
+            updateEmailStatus((int)$emailId, 'sent');
+            
+            // Force update batch counts to ensure accuracy
             updateBatchCounts($batchId);
             
             echo json_encode(['success' => true]);
@@ -149,8 +153,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } catch (Exception $e) {
             $errorMsg = $mail->ErrorInfo ?: $e->getMessage();
             
-            // Update status to failed
-            updateEmailStatus($emailId, 'failed', $errorMsg);
+            // Update status to failed - ensure it's updated from processing to failed
+            // Cast to int to ensure proper type
+            updateEmailStatus((int)$emailId, 'failed', $errorMsg);
+            
+            // Force update batch counts to ensure accuracy
             updateBatchCounts($batchId);
             
             echo json_encode(['success' => false, 'error' => $errorMsg]);
@@ -564,11 +571,11 @@ $progress = getBatchProgress($batchId);
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Successful</div>
-                        <div class="stat-value success" id="successCount"><?= $batch['sent_count'] ?></div>
+                        <div class="stat-value success" id="successCount"><?= $batch['sent_count'] ?? 0 ?></div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Failed</div>
-                        <div class="stat-value error" id="failedCount"><?= $batch['failed_count'] ?></div>
+                        <div class="stat-value error" id="failedCount"><?= $batch['failed_count'] ?? 0 ?></div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Pending</div>
@@ -599,7 +606,7 @@ $progress = getBatchProgress($batchId);
         let isPaused = <?= $batch['status'] === 'paused' ? 'true' : 'false' ?>;
         let isCancelled = <?= $batch['status'] === 'cancelled' ? 'true' : 'false' ?>;
         let isCompleted = <?= $batch['status'] === 'completed' ? 'true' : 'false' ?>;
-        let currentCount = <?= $batch['sent_count'] + $batch['failed_count'] ?>;
+        let currentCount = <?= ($batch['sent_count'] ?? 0) + ($batch['failed_count'] ?? 0) ?>;
 
         // Initialize UI
         updateProgress();
@@ -685,14 +692,16 @@ $progress = getBatchProgress($batchId);
 
                 const progress = await response.json();
 
-                const completed = progress.sent_count + progress.failed_count;
+                const sentCount = progress.sent_count !== null && progress.sent_count !== undefined ? parseInt(progress.sent_count) : 0;
+                const failedCount = progress.failed_count !== null && progress.failed_count !== undefined ? parseInt(progress.failed_count) : 0;
+                const completed = sentCount + failedCount;
                 const percentage = Math.round((completed / totalEmails) * 100);
 
                 document.getElementById('progressBar').style.width = percentage + '%';
                 document.getElementById('progressBar').textContent = percentage + '%';
                 document.getElementById('progressCount').textContent = completed + ' / ' + totalEmails;
-                document.getElementById('successCount').textContent = progress.sent_count;
-                document.getElementById('failedCount').textContent = progress.failed_count;
+                document.getElementById('successCount').textContent = sentCount;
+                document.getElementById('failedCount').textContent = failedCount;
                 document.getElementById('pendingCount').textContent = progress.pending_count;
 
                 currentCount = completed;
