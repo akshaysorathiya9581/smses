@@ -1150,7 +1150,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
                         <label for="debug">Show debug output (SMTP conversation)</label>
                     </div>
                     <div class="checkbox-group">
-                        <input type="checkbox" id="include_email_in_subject" name="include_email_in_subject" <?= isset($_POST['include_email_in_subject']) ? 'checked' : '' ?>>
+                        <input type="checkbox" id="include_email_in_subject" name="include_email_in_subject" <?= isset($_POST['include_email_in_subject']) ? 'checked' : '' ?> checked>
                         <label for="include_email_in_subject">Include recipient email ID in subject (e.g., "Subject santosh19")</label>
                     </div>
                 </div>

@@ -67,10 +67,40 @@ function getDbConnection() {
 }
 
 /**
+ * Reset emails stuck in processing state (older than 10 minutes)
+ */
+function resetStuckProcessingEmails() {
+    $mysqli = getDbConnection();
+    
+    // Reset emails that are in processing state, don't have sent_at, and were created more than 10 minutes ago
+    // This catches emails that got stuck in processing state
+    $sql = "UPDATE email_queue 
+            SET status = 'pending',
+                error_message = CONCAT(COALESCE(error_message, ''), ' [Reset from stuck processing state - retrying]')
+            WHERE status = 'processing' 
+            AND sent_at IS NULL
+            AND created_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)";
+    
+    $stmt = $mysqli->prepare($sql);
+    $stmt->execute();
+    $resetCount = $stmt->affected_rows;
+    $stmt->close();
+    
+    if ($resetCount > 0) {
+        error_log("Reset $resetCount stuck processing emails in cron job");
+    }
+    
+    return $resetCount;
+}
+
+/**
  * Get pending emails from all batches
  */
 function getPendingEmails() {
     $mysqli = getDbConnection();
+    
+    // First, reset any emails stuck in processing state
+    resetStuckProcessingEmails();
     
     // Try to include include_email_in_subject column if it exists
     $columnExists = false;
@@ -85,7 +115,8 @@ function getPendingEmails() {
     $includeEmailColumn = $columnExists ? ', eb.include_email_in_subject' : '';
     
     $sql = "SELECT eq.*, eb.smtp_host, eb.smtp_port, eb.smtp_security, eb.smtp_username, eb.smtp_password,
-                   eb.from_email, eb.from_name, eb.subject, eb.message as batch_message, eb.is_html, eb.debug_mode" . $includeEmailColumn . "
+                   eb.from_email, eb.from_name, eb.subject, eb.message as batch_message, eb.is_html, eb.debug_mode,
+                   COALESCE(eb.email_delay, 1) as email_delay" . $includeEmailColumn . "
             FROM email_queue eq
             INNER JOIN email_batches eb ON eq.batch_id = eb.batch_id
             WHERE eq.status = 'pending'
@@ -111,21 +142,51 @@ function getPendingEmails() {
 function updateEmailStatus($emailId, $status, $errorMessage = null) {
     $mysqli = getDbConnection();
     
-    $sql = "UPDATE email_queue 
-            SET status = ?, 
-                error_message = ?,
-                attempts = attempts + 1";
+    // Cast emailId to int to ensure proper type matching
+    $emailId = (int)$emailId;
     
+    // For 'sent' status, always update regardless of current status
     if ($status === 'sent') {
-        $sql .= ", sent_at = NOW()";
+        $sql = "UPDATE email_queue 
+                SET status = 'sent', 
+                    sent_at = NOW(),
+                    error_message = ?,
+                    attempts = attempts + 1
+                WHERE id = ?";
+        
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('si', $errorMessage, $emailId);
+        $stmt->execute();
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+        
+        // Log if update failed for debugging
+        if ($affectedRows === 0) {
+            error_log("ERROR: updateEmailStatus failed to update email_id: " . $emailId . " to 'sent' status. Email may not exist in database.");
+        } else {
+            error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to 'sent' status");
+        }
+    } else {
+        // For other statuses (failed, processing, etc.)
+        $sql = "UPDATE email_queue 
+                SET status = ?, 
+                    error_message = ?,
+                    attempts = attempts + 1
+                WHERE id = ?";
+        
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('ssi', $status, $errorMessage, $emailId);
+        $stmt->execute();
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+        
+        // Check if update was successful
+        if ($affectedRows === 0) {
+            error_log("ERROR: updateEmailStatus did not update any rows for email_id: " . $emailId . " with status: " . $status);
+        } else {
+            error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to status: " . $status);
+        }
     }
-    
-    $sql .= " WHERE id = ?";
-    
-    $stmt = $mysqli->prepare($sql);
-    $stmt->bind_param('ssi', $status, $errorMessage, $emailId);
-    $stmt->execute();
-    $stmt->close();
 }
 
 /**
@@ -252,8 +313,8 @@ function sendEmail($emailData) {
         $finalSubject = $emailData['subject'];
         $includeEmailInSubject = isset($emailData['include_email_in_subject']) && (int)$emailData['include_email_in_subject'] === 1;
         if ($includeEmailInSubject && !empty($emailData['recipient_email'])) {
-            $emailId = explode('@', $emailData['recipient_email'])[0]; // Get part before '@'
-            $finalSubject = $emailData['subject'] . ' ' . $emailId;
+            $emailPrefix = explode('@', $emailData['recipient_email'])[0]; // Get part before '@'
+            $finalSubject = $emailData['subject'] . ' ' . $emailPrefix;
         }
         $mail->Subject = $finalSubject;
         
@@ -283,7 +344,8 @@ function sendEmail($emailData) {
         return ['success' => true, 'message' => 'Email sent successfully'];
         
     } catch (Exception $e) {
-        return ['success' => false, 'message' => $mail->ErrorInfo ?: $e->getMessage()];
+        $errorMsg = (isset($mail) && is_object($mail)) ? $mail->ErrorInfo : '';
+        return ['success' => false, 'message' => $errorMsg ?: $e->getMessage()];
     }
 }
 
@@ -343,8 +405,11 @@ function processPendingEmails() {
                 $processedBatches[] = $email['batch_id'];
             }
             
-            // Small delay to avoid overwhelming SMTP server
-            usleep(200000); // 0.2 seconds
+            // Dynamic delay based on batch configuration (email_delay is in seconds, convert to microseconds)
+            $delaySeconds = isset($email['email_delay']) ? (float)$email['email_delay'] : 1.0;
+            if ($delaySeconds > 0) {
+                usleep((int)($delaySeconds * 1000000)); // Convert seconds to microseconds
+            }
         }
         
         // Final batch status check for all processed batches
@@ -376,10 +441,27 @@ $output = [];
 // Check if running from command line or web
 $isCli = php_sapi_name() === 'cli';
 
+// Log file path for cron job logging (optional)
+$logFile = __DIR__ . '/cron-email-log.txt';
+
 if (!$isCli) {
     // Set content type for web access
     header('Content-Type: text/plain; charset=utf-8');
 }
+
+// Function to write to log file
+function writeToLog($message, $logFile) {
+    $timestamp = date('Y-m-d H:i:s');
+    $logMessage = "[$timestamp] $message\n";
+    file_put_contents($logFile, $logMessage, FILE_APPEND | LOCK_EX);
+}
+
+// Log cron start - always log regardless of CLI or web mode
+$runMode = $isCli ? 'CLI' : 'WEB';
+writeToLog("==========================================", $logFile);
+writeToLog("Cron job started - Mode: $runMode", $logFile);
+writeToLog("Pending Emails Cronjob - " . date('Y-m-d H:i:s'), $logFile);
+writeToLog("==========================================", $logFile);
 
 $output[] = "==========================================";
 $output[] = "Pending Emails Cronjob - " . date('Y-m-d H:i:s');
@@ -405,9 +487,20 @@ try {
         }
     }
     
+    // Log to file if CLI mode
+    if ($isCli) {
+        writeToLog("Status: " . ($result['success'] ? 'SUCCESS' : 'FAILED'), $logFile);
+        writeToLog("Processed: " . $result['results']['processed'] . " | Sent: " . $result['results']['sent'] . " | Failed: " . $result['results']['failed'], $logFile);
+    }
+    
 } catch (Exception $e) {
     $output[] = "FATAL ERROR: " . $e->getMessage();
     error_log("Cronjob Error: " . $e->getMessage());
+    
+    // Log error to file if CLI mode
+    if ($isCli) {
+        writeToLog("FATAL ERROR: " . $e->getMessage(), $logFile);
+    }
 }
 
 $endTime = microtime(true);
@@ -420,6 +513,12 @@ $output[] = "==========================================";
 // Output results
 echo implode("\n", $output);
 
+// Write completion to log file if CLI mode
+if ($isCli) {
+    writeToLog("Cron job completed in " . $executionTime . " seconds", $logFile);
+    writeToLog("------------------------------------------", $logFile);
+}
+
 // Close database connection
 if (function_exists('getDbConnection')) {
     try {
@@ -431,4 +530,3 @@ if (function_exists('getDbConnection')) {
 }
 
 ?>
-
