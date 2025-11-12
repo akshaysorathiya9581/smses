@@ -124,6 +124,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
     $subject  = field('subject', 'SMTP Test from PHP');
     $message  = field('message', "Hello,\n\nThis is a test email sent via SMTP.\n\nTime: " . date('Y-m-d H:i:s'));
     $isHtml   = isset($_POST['html_email']);
+    $includeEmailInSubject = isset($_POST['include_email_in_subject']);
 
     // Enhanced validation
     $errors = [];
@@ -205,7 +206,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
 
                 // Content
                 $mail->isHTML($isHtml);
-                $mail->Subject = $subject;
+                
+                // Append email ID to subject if checkbox is checked
+                $finalSubject = $subject;
+                if ($includeEmailInSubject && !empty($to)) {
+                    $emailId = explode('@', $to)[0]; // Get part before '@'
+                    $finalSubject = $subject . ' ' . $emailId;
+                }
+                $mail->Subject = $finalSubject;
                 
                 if ($isHtml) {
                     $mail->Body = nl2br(htmlspecialchars($message));
@@ -272,7 +280,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
                         'is_html' => $isHtml,
                         'debug' => isset($_POST['debug']),
                         'delay' => (int) field('email_delay', 1),
-                        'total_emails' => count($validEmails)
+                        'total_emails' => count($validEmails),
+                        'include_email_in_subject' => $includeEmailInSubject
                     ];
                     
                     // Create batch in database
@@ -1139,6 +1148,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax_send'])) {
                     <div class="checkbox-group">
                         <input type="checkbox" id="debug" name="debug" <?= isset($_POST['debug']) ? 'checked' : '' ?>>
                         <label for="debug">Show debug output (SMTP conversation)</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="include_email_in_subject" name="include_email_in_subject" <?= isset($_POST['include_email_in_subject']) ? 'checked' : '' ?>>
+                        <label for="include_email_in_subject">Include recipient email ID in subject (e.g., "Subject santosh19")</label>
                     </div>
                 </div>
 

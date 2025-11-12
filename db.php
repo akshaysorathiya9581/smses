@@ -45,31 +45,74 @@ function createEmailBatch($config) {
     $mysqli = getDbConnection();
     $batchId = uniqid('batch_', true);
     
-    $sql = "INSERT INTO email_batches (
-        batch_id, smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
-        from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    // Check if include_email_in_subject column exists
+    $includeEmailInSubject = isset($config['include_email_in_subject']) && $config['include_email_in_subject'] ? 1 : 0;
+    $columnExists = false;
     
-    $stmt = $mysqli->prepare($sql);
-    $is_html = $config['is_html'] ? 1 : 0;
-    $debug_mode = $config['debug'] ? 1 : 0;
+    try {
+        $checkSql = "SHOW COLUMNS FROM email_batches LIKE 'include_email_in_subject'";
+        $result = $mysqli->query($checkSql);
+        $columnExists = $result && $result->num_rows > 0;
+    } catch (Exception $e) {
+        // Column doesn't exist, use old schema
+        $columnExists = false;
+    }
     
-    $stmt->bind_param('ssisssssssiiii',
-        $batchId,
-        $config['host'],
-        $config['port'],
-        $config['security'],
-        $config['username'],
-        $config['password'],
-        $config['from_email'],
-        $config['from_name'],
-        $config['subject'],
-        $config['message'],
-        $is_html,
-        $debug_mode,
-        $config['delay'],
-        $config['total_emails']
-    );
+    if ($columnExists) {
+        $sql = "INSERT INTO email_batches (
+            batch_id, smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
+            from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails, include_email_in_subject
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        $stmt = $mysqli->prepare($sql);
+        $is_html = $config['is_html'] ? 1 : 0;
+        $debug_mode = $config['debug'] ? 1 : 0;
+        
+        $stmt->bind_param('ssisssssssiiiii',
+            $batchId,
+            $config['host'],
+            $config['port'],
+            $config['security'],
+            $config['username'],
+            $config['password'],
+            $config['from_email'],
+            $config['from_name'],
+            $config['subject'],
+            $config['message'],
+            $is_html,
+            $debug_mode,
+            $config['delay'],
+            $config['total_emails'],
+            $includeEmailInSubject
+        );
+    } else {
+        // Fallback to old schema if column doesn't exist
+        $sql = "INSERT INTO email_batches (
+            batch_id, smtp_host, smtp_port, smtp_security, smtp_username, smtp_password,
+            from_email, from_name, subject, message, is_html, debug_mode, email_delay, total_emails
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        $stmt = $mysqli->prepare($sql);
+        $is_html = $config['is_html'] ? 1 : 0;
+        $debug_mode = $config['debug'] ? 1 : 0;
+        
+        $stmt->bind_param('ssisssssssiiii',
+            $batchId,
+            $config['host'],
+            $config['port'],
+            $config['security'],
+            $config['username'],
+            $config['password'],
+            $config['from_email'],
+            $config['from_name'],
+            $config['subject'],
+            $config['message'],
+            $is_html,
+            $debug_mode,
+            $config['delay'],
+            $config['total_emails']
+        );
+    }
     
     $stmt->execute();
     $stmt->close();

@@ -72,8 +72,20 @@ function getDbConnection() {
 function getPendingEmails() {
     $mysqli = getDbConnection();
     
+    // Try to include include_email_in_subject column if it exists
+    $columnExists = false;
+    try {
+        $checkSql = "SHOW COLUMNS FROM email_batches LIKE 'include_email_in_subject'";
+        $checkResult = $mysqli->query($checkSql);
+        $columnExists = $checkResult && $checkResult->num_rows > 0;
+    } catch (Exception $e) {
+        $columnExists = false;
+    }
+    
+    $includeEmailColumn = $columnExists ? ', eb.include_email_in_subject' : '';
+    
     $sql = "SELECT eq.*, eb.smtp_host, eb.smtp_port, eb.smtp_security, eb.smtp_username, eb.smtp_password,
-                   eb.from_email, eb.from_name, eb.subject, eb.message as batch_message, eb.is_html, eb.debug_mode
+                   eb.from_email, eb.from_name, eb.subject, eb.message as batch_message, eb.is_html, eb.debug_mode" . $includeEmailColumn . "
             FROM email_queue eq
             INNER JOIN email_batches eb ON eq.batch_id = eb.batch_id
             WHERE eq.status = 'pending'
@@ -224,7 +236,15 @@ function sendEmail($emailData) {
         // Content
         $isHtml = (int)$emailData['is_html'] === 1;
         $mail->isHTML($isHtml);
-        $mail->Subject = $emailData['subject'];
+        
+        // Append email ID to subject if the option is enabled
+        $finalSubject = $emailData['subject'];
+        $includeEmailInSubject = isset($emailData['include_email_in_subject']) && (int)$emailData['include_email_in_subject'] === 1;
+        if ($includeEmailInSubject && !empty($emailData['recipient_email'])) {
+            $emailId = explode('@', $emailData['recipient_email'])[0]; // Get part before '@'
+            $finalSubject = $emailData['subject'] . ' ' . $emailId;
+        }
+        $mail->Subject = $finalSubject;
         
         // Use message from email_queue if available, otherwise use batch message
         $message = !empty($emailData['message']) ? $emailData['message'] : $emailData['batch_message'];

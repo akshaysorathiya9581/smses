@@ -112,7 +112,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             
             // Content
             $mail->isHTML($batch['is_html']);
-            $mail->Subject = $batch['subject'];
+            
+            // Append email ID to subject if the option is enabled
+            $finalSubject = $batch['subject'];
+            $includeEmailInSubject = isset($batch['include_email_in_subject']) && (int)$batch['include_email_in_subject'] === 1;
+            if ($includeEmailInSubject && !empty($recipientEmail)) {
+                $emailId = explode('@', $recipientEmail)[0]; // Get part before '@'
+                $finalSubject = $batch['subject'] . ' ' . $emailId;
+            }
+            $mail->Subject = $finalSubject;
             
             if ($batch['is_html']) {
                 $mail->Body = nl2br(htmlspecialchars($batch['message']));
