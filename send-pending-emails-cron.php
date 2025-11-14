@@ -114,12 +114,15 @@ function getPendingEmails() {
     
     $includeEmailColumn = $columnExists ? ', eb.include_email_in_subject' : '';
     
+    // Only get emails that are pending and NOT already sent
+    // Also exclude emails that are currently being processed (to prevent race conditions)
     $sql = "SELECT eq.*, eb.smtp_host, eb.smtp_port, eb.smtp_security, eb.smtp_username, eb.smtp_password,
                    eb.from_email, eb.from_name, eb.subject, eb.message as batch_message, eb.is_html, eb.debug_mode,
                    COALESCE(eb.email_delay, 1) as email_delay" . $includeEmailColumn . "
             FROM email_queue eq
             INNER JOIN email_batches eb ON eq.batch_id = eb.batch_id
             WHERE eq.status = 'pending'
+            AND eq.sent_at IS NULL
             AND eb.status IN ('pending', 'processing')
             ORDER BY eq.id ASC
             LIMIT 50";
@@ -145,14 +148,17 @@ function updateEmailStatus($emailId, $status, $errorMessage = null) {
     // Cast emailId to int to ensure proper type matching
     $emailId = (int)$emailId;
     
-    // For 'sent' status, always update regardless of current status
+    // For 'sent' status, only update if not already sent (prevent duplicates)
     if ($status === 'sent') {
+        // Only update if email is not already sent - this prevents duplicate sends
         $sql = "UPDATE email_queue 
                 SET status = 'sent', 
                     sent_at = NOW(),
                     error_message = ?,
                     attempts = attempts + 1
-                WHERE id = ?";
+                WHERE id = ? 
+                AND status != 'sent' 
+                AND sent_at IS NULL";
         
         $stmt = $mysqli->prepare($sql);
         $stmt->bind_param('si', $errorMessage, $emailId);
@@ -162,17 +168,41 @@ function updateEmailStatus($emailId, $status, $errorMessage = null) {
         
         // Log if update failed for debugging
         if ($affectedRows === 0) {
-            error_log("ERROR: updateEmailStatus failed to update email_id: " . $emailId . " to 'sent' status. Email may not exist in database.");
+            error_log("WARNING: updateEmailStatus did not update email_id: " . $emailId . " to 'sent' status. Email may already be sent or not exist.");
         } else {
             error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to 'sent' status");
         }
+    } elseif ($status === 'processing') {
+        // For processing status, only update if still pending (prevent race conditions)
+        $sql = "UPDATE email_queue 
+                SET status = 'processing', 
+                    error_message = ?,
+                    attempts = attempts + 1
+                WHERE id = ? 
+                AND status = 'pending'";
+        
+        $stmt = $mysqli->prepare($sql);
+        $stmt->bind_param('si', $errorMessage, $emailId);
+        $stmt->execute();
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+        
+        // Check if update was successful
+        if ($affectedRows === 0) {
+            error_log("WARNING: updateEmailStatus did not update email_id: " . $emailId . " to 'processing' status. Email may already be processed.");
+            return false; // Return false if couldn't update (email already processed)
+        } else {
+            error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to 'processing' status");
+            return true;
+        }
     } else {
-        // For other statuses (failed, processing, etc.)
+        // For other statuses (failed, etc.) - only update if not already sent
         $sql = "UPDATE email_queue 
                 SET status = ?, 
                     error_message = ?,
                     attempts = attempts + 1
-                WHERE id = ?";
+                WHERE id = ? 
+                AND status != 'sent'";
         
         $stmt = $mysqli->prepare($sql);
         $stmt->bind_param('ssi', $status, $errorMessage, $emailId);
@@ -182,11 +212,13 @@ function updateEmailStatus($emailId, $status, $errorMessage = null) {
         
         // Check if update was successful
         if ($affectedRows === 0) {
-            error_log("ERROR: updateEmailStatus did not update any rows for email_id: " . $emailId . " with status: " . $status);
+            error_log("WARNING: updateEmailStatus did not update any rows for email_id: " . $emailId . " with status: " . $status . " (may already be sent)");
         } else {
             error_log("SUCCESS: updateEmailStatus updated email_id: " . $emailId . " to status: " . $status);
         }
     }
+    
+    return true;
 }
 
 /**
@@ -377,14 +409,34 @@ function processPendingEmails() {
         
         // Process each email
         foreach ($pendingEmails as $email) {
-            // Mark as processing
-            updateEmailStatus($email['id'], 'processing');
+            // Double-check email is still pending before processing (prevent race conditions)
+            $mysqli = getDbConnection();
+            $checkSql = "SELECT id, status, sent_at FROM email_queue WHERE id = ? AND status = 'pending' AND sent_at IS NULL";
+            $checkStmt = $mysqli->prepare($checkSql);
+            $checkStmt->bind_param('i', $email['id']);
+            $checkStmt->execute();
+            $checkResult = $checkStmt->get_result();
+            $emailCheck = $checkResult->fetch_assoc();
+            $checkStmt->close();
+            
+            // Skip if email is no longer pending or already sent
+            if (!$emailCheck || $emailCheck['status'] !== 'pending' || $emailCheck['sent_at'] !== null) {
+                error_log("SKIP: Email ID " . $email['id'] . " is no longer pending (status: " . ($emailCheck['status'] ?? 'unknown') . "). Skipping to prevent duplicate send.");
+                continue;
+            }
+            
+            // Mark as processing - only proceed if successfully marked
+            $markedProcessing = updateEmailStatus($email['id'], 'processing');
+            if (!$markedProcessing) {
+                error_log("SKIP: Email ID " . $email['id'] . " could not be marked as processing. Another process may be handling it. Skipping.");
+                continue;
+            }
             
             // Send email
             $sendResult = sendEmail($email);
             
             if ($sendResult['success']) {
-                // Update status to sent
+                // Update status to sent (with duplicate check)
                 updateEmailStatus($email['id'], 'sent');
                 $results['sent']++;
             } else {
